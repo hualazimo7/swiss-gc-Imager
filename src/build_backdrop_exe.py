@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """把 SwissBackdrop 打成 Windows 单文件 EXE。
 
-    C:\\Python314\\python.exe tools\\build_backdrop_exe.py
+    python.exe tools\\build_backdrop_exe.py
     ... --no-clean          # 复用 PyInstaller 缓存，增量重建
 
 产物：dist/SwissBackdrop.exe（onefile + windowed，双击无控制台黑窗）
@@ -28,8 +28,8 @@ VERSION_TXT = """\
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 1, 0, 0),
-    prodvers=(1, 1, 0, 0),
+    filevers=(1, 2, 0, 0),
+    prodvers=(1, 2, 0, 0),
     mask=0x3f, flags=0x0,
     OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)
   ),
@@ -37,13 +37,13 @@ VSVersionInfo(
     StringFileInfo([
       StringTable('080404B0', [
         StringStruct('CompanyName', 'Swiss-GC 简中汉化项目'),
-        StringStruct('FileDescription', 'SwissBackdrop - GameCube Swiss 自定义背景图工具（支持离线 SD 卡导出）'),
-        StringStruct('FileVersion', '1.1.0.0'),
+        StringStruct('FileDescription', 'SwissBackdrop - GameCube Swiss 自定义背景图工具（多图批量编号 + 离线 SD 卡导出）'),
+        StringStruct('FileVersion', '1.2.0.0'),
         StringStruct('InternalName', 'SwissBackdrop'),
         StringStruct('LegalCopyright', '基于 GPLv2 的 Swiss 生态工具'),
         StringStruct('OriginalFilename', 'SwissBackdrop.exe'),
         StringStruct('ProductName', 'SwissBackdrop'),
-        StringStruct('ProductVersion', '1.1.0')
+        StringStruct('ProductVersion', '1.2.0')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])
@@ -60,7 +60,7 @@ def preflight() -> None:
         import PIL  # noqa: F401
         import PyInstaller  # noqa: F401
     except ImportError as exc:
-        raise SystemExit("缺少依赖（请用 C:\\Python314\\python.exe）：%s" % exc)
+        raise SystemExit("缺少依赖（请用 python.exe）：%s" % exc)
     if sys.version_info < (3, 10):
         raise SystemExit("需要 Python 3.10+")
     if not ICON.exists():

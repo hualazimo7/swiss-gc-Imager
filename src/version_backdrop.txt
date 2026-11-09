@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 1, 0, 0),
-    prodvers=(1, 1, 0, 0),
+    filevers=(1, 2, 0, 0),
+    prodvers=(1, 2, 0, 0),
     mask=0x3f, flags=0x0,
     OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)
   ),
@@ -10,13 +10,13 @@ VSVersionInfo(
     StringFileInfo([
       StringTable('080404B0', [
         StringStruct('CompanyName', 'Swiss-GC 简中汉化项目'),
-        StringStruct('FileDescription', 'SwissBackdrop - GameCube Swiss 自定义背景图工具（支持离线 SD 卡导出）'),
-        StringStruct('FileVersion', '1.1.0.0'),
+        StringStruct('FileDescription', 'SwissBackdrop - GameCube Swiss 自定义背景图工具（多图批量编号 + 离线 SD 卡导出）'),
+        StringStruct('FileVersion', '1.2.0.0'),
         StringStruct('InternalName', 'SwissBackdrop'),
         StringStruct('LegalCopyright', '基于 GPLv2 的 Swiss 生态工具'),
         StringStruct('OriginalFilename', 'SwissBackdrop.exe'),
         StringStruct('ProductName', 'SwissBackdrop'),
-        StringStruct('ProductVersion', '1.1.0')
+        StringStruct('ProductVersion', '1.2.0')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])

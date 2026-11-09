@@ -5,20 +5,28 @@
     python tools/swiss_backdrop.py                       图形界面（默认）
     python tools/swiss_backdrop.py --selftest           编码/解码/中文路径自检
     python tools/swiss_backdrop.py --version
-    python tools/swiss_backdrop.py --cli --build --images a.png b.png --out bg.tpl
-    python tools/swiss_backdrop.py --cli --build --images a.png --sd-package out/SD --zip
-    python tools/swiss_backdrop.py --cli --sd-tpl bg.tpl --write-drive G:
-    python tools/swiss_backdrop.py --cli --host 192.168.1.2 --upload bg.tpl
+    python tools/swiss_backdrop.py --cli --build --images a.png b.png --out-dir out
+    python tools/swiss_backdrop.py --cli --build --images a.png b.png --sd-package out/SD --zip
+    python tools/swiss_backdrop.py --cli --host 192.168.1.2 --upload-dir out
     python tools/swiss_backdrop.py --cli --host 192.168.1.2 --remove
     python tools/swiss_backdrop.py --cli --host 192.168.1.2 --screen shot.png
 
-Swiss 开机时读 `<启动设备>:/swiss/backdrop.tpl`，读到合法 TPL 就替换主界面背景。
-本工具把「选图 → 裁切 → 调色 → 预览（可叠加模拟 UI）→ 编码 TPL → 生成 SD 卡文件
+固件在「设置 → 界面设置 (2/6) → 背景图」里用左右键选 0~9：
+    1~9 → <启动设备>:/swiss/backdrop1.tpl ~ backdrop9.tpl（即时切换）
+    0   → 关闭，保留内置默认背景
+    编号 1 且 backdrop1.tpl 不存在时，回退旧名 swiss/backdrop.tpl
+
+本工具默认「逐张编号」：图片列表按顺序，一张图编码成一个独立的
+backdropN.tpl（最多 9 张），导出到 SD 卡包 / 文件夹 / 直写盘符 / 联网直传
+都会自动排好序号。切到「合并为 backdrop.tpl」则保留旧版行为：
+一个 TPL 内放多张贴图，由固件按日历轮换。
+
+把「选图 → 裁切 → 调色 → 预览（可叠加模拟 UI）→ 编码 TPL → 生成 SD 卡文件
 → 回读校验 / 抓实机画面」收在一个窗口里，且**不需要 devkitPro / gxtexconv** ——
 TPL 编码全部由 tools/tplcodec.py 用 Pillow 实现，中文路径也不会崩。
 
 **不是每台 GameCube 都装了网卡**：主路径是纯离线的 `tools/sdcard_export.py`，
-生成 `SwissBackdrop_SD/swiss/backdrop.tpl` 文件夹让用户自己拷进 SD 卡，
+生成 `SwissBackdrop_SD/swiss/backdrop1.tpl…` 文件夹让用户自己拷进 SD 卡，
 也可直接写 SD 卡盘符。联网直传（Swiss httpd(80) 的 FatFs 端点，见 swiss_client.py）
 只是可选加速项，没有网络时全部离线功能照样可用。
 """
@@ -56,10 +64,16 @@ import grab_screen  # noqa: E402
 import sdcard_export as sd  # noqa: E402
 
 APP_NAME = "SwissBackdrop"
-APP_VER = "1.1"
+APP_VER = "1.2"
 CONFIG_PATH = Path.home() / ".swissbackdrop.json"
 FROZEN = bool(getattr(sys, "frozen", False))
-REMOTE_NAME = "swiss/backdrop.tpl"
+REMOTE_DIR = "swiss/"
+REMOTE_NAME = "swiss/backdrop.tpl"          # 旧名，1 号缺失时固件会回退
+MAX_BACKDROPS = 9
+MODE_LABELS = {
+    "numbered": "逐张编号 backdrop1~9（推荐）",
+    "merged": "合并为 backdrop.tpl（旧版轮换）",
+}
 
 THEMES = {
     "light": dict(
@@ -266,30 +280,58 @@ def readability(im: Image.Image) -> tuple:
 
 # --------------------------------------------------------------------------- 业务
 def build_tpl(image_paths, width, height, fit, fmt, adj: Adjust) -> bytes:
+    """旧模式：所有图片合并进一个多贴图 TPL，由固件按日历轮换。"""
     imgs = [prepare_image(p, width, height, fit, adj) for p in image_paths]
     return encode_tpl(imgs, fmt)
+
+
+def build_numbered(image_paths, width, height, fit, fmt, adj: Adjust) -> dict[str, bytes]:
+    """新模式：一张图一个独立的单贴图 TPL，按列表顺序编号 1~9。"""
+    if not 1 <= len(image_paths) <= MAX_BACKDROPS:
+        raise ValueError("逐张编号模式支持 1~%d 张图片，当前 %d 张。\n"
+                         "请删掉多余图片，或改用「合并为 backdrop.tpl」模式。"
+                         % (MAX_BACKDROPS, len(image_paths)))
+    files = {}
+    for i, p in enumerate(image_paths, 1):
+        im = prepare_image(p, width, height, fit, adj)
+        files["backdrop%d.tpl" % i] = encode_tpl([im], fmt)
+    return files
+
+
+def build_set(image_paths, width, height, fit, fmt, adj: Adjust,
+              mode: str = "numbered") -> dict[str, bytes]:
+    """统一入口：返回 {文件名: TPL 字节}，供所有导出/上传路径复用。"""
+    if mode == "merged":
+        return {sd.BACKDROP_NAME: build_tpl(image_paths, width, height, fit, fmt, adj)}
+    return build_numbered(image_paths, width, height, fit, fmt, adj)
+
+
+def numbering_hint(n: int, mode: str = "numbered") -> str:
+    if mode == "merged":
+        return rotation_hint(n) + "\n（单个 backdrop.tpl，固件按贴图数轮换）"
+    if n == 0:
+        return "添加图片后按顺序生成 backdrop1.tpl、backdrop2.tpl…"
+    if n > MAX_BACKDROPS:
+        return ("⚠ 共 %d 张，固件最多认 %d 个编号。\n请删到 %d 张以内或改用合并模式。"
+                % (n, MAX_BACKDROPS, MAX_BACKDROPS))
+    return ("共 %d 张 → backdrop1.tpl ~ backdrop%d.tpl\n"
+            "Swiss 设置 → 界面设置(2/6) → 背景图选 1~%d"
+            % (n, n, n))
 
 
 def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def remote_path(client: SwissClient) -> str:
+def remote_path(client: SwissClient, name: str | None = None) -> str:
     vol = client.detect_volume()
-    return vol + REMOTE_NAME
+    return vol + REMOTE_DIR + (name or sd.BACKDROP_NAME)
 
 
-def upload_tpl(host: str, data: bytes, progress=None) -> dict:
-    """上传 + 回读 SHA-256 校验，返回诊断信息。"""
-    c = SwissClient(host)
-    if not c.ping():
-        raise SwissError("连不上 %s 的 Swiss httpd（80 端口）" % host)
-    st = c.state()
-    if st.get("busy") == "1":
-        raise SwissError("Swiss 正在扫描目录，稍等几秒再试")
-    target = remote_path(c)
+def _upload_one(c: SwissClient, data: bytes, target: str, st: dict,
+                progress=None) -> dict:
     tmpdir = tempfile.mkdtemp(prefix="swissbg_")
-    local = os.path.join(tmpdir, "backdrop.tpl")
+    local = os.path.join(tmpdir, os.path.basename(target))
     with open(local, "wb") as fh:
         fh.write(data)
     reply = c.upload(local, target, progress=progress)
@@ -299,8 +341,8 @@ def upload_tpl(host: str, data: bytes, progress=None) -> dict:
     with open(back, "rb") as fh:
         got = fh.read()
     if got != data:
-        raise SwissError("回读校验失败：SD 卡上是 %d 字节 / %s，本地是 %d 字节 / %s"
-                         % (len(got), sha(got)[:12], len(data), sha(data)[:12]))
+        raise SwissError("回读校验失败：%s 上是 %d 字节 / %s，本地是 %d 字节 / %s"
+                         % (target, len(got), sha(got)[:12], len(data), sha(data)[:12]))
     try:
         os.remove(local)
         os.remove(back)
@@ -311,12 +353,60 @@ def upload_tpl(host: str, data: bytes, progress=None) -> dict:
             "reply": reply, "state": st}
 
 
-def remove_tpl(host: str) -> str:
+def upload_tpl(host: str, data: bytes, progress=None, name: str | None = None) -> dict:
+    """上传单个 TPL + 回读 SHA-256 校验，返回诊断信息。"""
     c = SwissClient(host)
     if not c.ping():
         raise SwissError("连不上 %s 的 Swiss httpd（80 端口）" % host)
-    target = remote_path(c)
-    return c.delete(target)
+    st = c.state()
+    if st.get("busy") == "1":
+        raise SwissError("Swiss 正在扫描目录，稍等几秒再试")
+    return _upload_one(c, data, remote_path(c, name), st, progress)
+
+
+def upload_tpls(host: str, files, progress=None) -> dict:
+    """批量上传 backdrop1.tpl…；一次 ping/state，逐个上传并回读校验。"""
+    files = sd.normalize_files(files)
+    c = SwissClient(host)
+    if not c.ping():
+        raise SwissError("连不上 %s 的 Swiss httpd（80 端口）" % host)
+    st = c.state()
+    if st.get("busy") == "1":
+        raise SwissError("Swiss 正在扫描目录，稍等几秒再试")
+    vol = c.detect_volume()
+    names = sorted(files)
+    total = sum(len(files[n]) for n in names)
+    done = 0
+    results = []
+    for n in names:
+        base = done
+
+        def sub(sent, part, speed, _base=base):
+            if progress:
+                progress(_base + sent, total, speed)
+
+        results.append(_upload_one(c, files[n], vol + REMOTE_DIR + n, st, sub))
+        done += len(files[n])
+    return {"files": results, "names": names, "size": total,
+            "targets": [r["target"] for r in results]}
+
+
+def remove_tpl(host: str) -> str:
+    """远端删除旧名 + 1~9 号背景图；不存在的文件跳过，不碰其它文件。"""
+    c = SwissClient(host)
+    if not c.ping():
+        raise SwissError("连不上 %s 的 Swiss httpd（80 端口）" % host)
+    vol = c.detect_volume()
+    removed = []
+    for name in [sd.BACKDROP_NAME] + sd.NUMBERED_NAMES:
+        try:
+            c.delete(vol + REMOTE_DIR + name)
+            removed.append(name)
+        except (SwissError, OSError, ValueError):
+            pass
+    if not removed:
+        return "远端没有 backdrop*.tpl（本来就是内置默认背景）"
+    return "已删除 %d 个：%s" % (len(removed), "、".join(removed))
 
 
 def grab_frame(host: str) -> Image.Image:
@@ -347,6 +437,8 @@ class App(tk.Tk):
 
         self.images: list[str] = [p for p in cfg.get("images", []) if os.path.isfile(p)]
         self.host_var = tk.StringVar(value=cfg.get("host", DEFAULT_HOST))
+        self.mode_var = tk.StringVar(
+            value=MODE_LABELS.get(cfg.get("mode", "numbered"), MODE_LABELS["numbered"]))
         self.fmt_var = tk.StringVar(value=cfg.get("format", "rgb5a3"))
         self.size_var = tk.StringVar(value=cfg.get("size", "640x480"))
         self.fit_var = tk.StringVar(value=cfg.get("fit", "cover"))
@@ -363,7 +455,7 @@ class App(tk.Tk):
         self.q: queue.Queue = queue.Queue()
         self.busy = False
         self._preview_job = None
-        self._last_tpl: bytes | None = None
+        self._last_files: dict[str, bytes] | None = None
 
         self.title("%s  ·  Swiss 自定义背景图工作台" % APP_NAME)
         self.geometry("1240x900")
@@ -455,7 +547,7 @@ class App(tk.Tk):
         # ---- 左：图片列表
         left = self._card(body)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        ttk.Label(left, text="图片列表", style="Head.TLabel").pack(anchor="w")
+        ttk.Label(left, text="图片列表（顺序 = 编号）", style="Head.TLabel").pack(anchor="w")
         self.lb = tk.Listbox(left, height=11, activestyle="none", bd=0,
                              highlightthickness=1,
                              highlightbackground=t["border"],
@@ -520,6 +612,8 @@ class App(tk.Tk):
             cb.bind("<<ComboboxSelected>>", lambda e: self._schedule_preview())
             return cb
 
+        mode_cb = combo("生成方式", self.mode_var, list(MODE_LABELS.values()), width=20)
+        mode_cb.bind("<<ComboboxSelected>>", lambda e: self._sync_images())
         combo("分辨率", self.size_var, ["640x480", "320x240"])
         combo("裁切", self.fit_var, ["cover", "contain", "stretch"])
         combo("纹理格式", self.fmt_var, list(FORMATS))
@@ -564,7 +658,7 @@ class App(tk.Tk):
                    command=self._export_sd_package).pack(fill="x", pady=(8, 0))
         ttk.Checkbutton(right, text="同时打包成 zip",
                         variable=self.zip_var).pack(anchor="w", pady=(4, 0))
-        ttk.Button(right, text="② 只导出 backdrop.tpl…",
+        ttk.Button(right, text="② 只导出 TPL 文件…（自动编号）",
                    command=self._save_tpl).pack(fill="x", pady=(6, 0))
 
         # ---- 底部：离线优先（无需网卡），联网直传只是可选
@@ -620,17 +714,28 @@ class App(tk.Tk):
         self._update_hints()
 
     # ------------------------------------------------------------------ 图片列表
+    def _mode(self) -> str:
+        label = self.mode_var.get()
+        return next((k for k, v in MODE_LABELS.items() if v == label), "numbered")
+
     def _sync_images(self):
+        mode = self._mode()
         self.lb.delete(0, "end")
         for i, p in enumerate(self.images):
-            self.lb.insert("end", "%d. %s" % (i + 1, os.path.basename(p)))
+            tag = ("%d → backdrop%d.tpl  " % (i + 1, i + 1)
+                   if mode == "numbered" else "%d. " % (i + 1))
+            self.lb.insert("end", tag + os.path.basename(p))
         if self.images and not self.lb.curselection():
             self.lb.selection_set(0)
-        self.rot_label.configure(text=rotation_hint(len(self.images)))
+        n = len(self.images)
+        self.rot_label.configure(
+            text=numbering_hint(n, mode),
+            foreground=self.t["warn"] if (mode == "numbered" and n > MAX_BACKDROPS)
+            else self.t["muted"])
 
     def _add_images(self):
         files = filedialog.askopenfilenames(
-            title="选择背景图片（可多选，多张会按日历轮换）",
+            title="选择背景图片（可多选，按顺序生成 backdrop1.tpl、backdrop2.tpl…）",
             filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff"),
                        ("所有文件", "*.*")])
         added = 0
@@ -750,9 +855,11 @@ class App(tk.Tk):
         shown = draw_ui_overlay(im) if self.overlay_var.get() else im
         self._show_image(shown)
         sz = estimate_size(max(1, len(self.images)), w, h, self.fmt_var.get())
+        tag = ("%d 个编号 TPL" % len(self.images) if self._mode() == "numbered"
+               else "%d 张贴图 / 1 个 TPL" % len(self.images))
         self.stat_label.configure(
-            text="%dx%d · 平均亮度 %.1f · 文字区 %.1f · 预计 TPL 约 %.0f KB · %s"
-                 % (w, h, mean, text_l, sz / 1024, rotation_hint(len(self.images))))
+            text="%dx%d · 平均亮度 %.1f · 文字区 %.1f · 预计合计约 %.0f KB · %s"
+                 % (w, h, mean, text_l, sz / 1024, tag))
         self.advice_label.configure(text="可读性：" + advice)
 
     def _show_image(self, im: Image.Image):
@@ -818,38 +925,62 @@ class App(tk.Tk):
         self.after(100, self._poll)
 
     # ------------------------------------------------------------------ 生成/传输
-    def _build_bytes(self) -> bytes:
+    def _build_files(self) -> dict[str, bytes]:
         if not self.images:
             raise ValueError("请先添加至少一张图片")
         for p in self.images:
             if not os.path.isfile(p):
                 raise ValueError("图片不存在：%s" % p)
         w, h = (int(x) for x in self.size_var.get().split("x"))
-        return build_tpl(self.images, w, h, self.fit_var.get(),
-                         self.fmt_var.get(), self._get_adjust())
+        return build_set(self.images, w, h, self.fit_var.get(),
+                         self.fmt_var.get(), self._get_adjust(), self._mode())
+
+    def _expected_names(self) -> list[str]:
+        """仅用于覆盖确认/文案预估；真正的张数校验在 _build_files 里。"""
+        if not self.images:
+            return []
+        if self._mode() == "merged":
+            return [sd.BACKDROP_NAME]
+        return sd.numbered_names(min(len(self.images), MAX_BACKDROPS))
 
     def _save_tpl(self):
-        out = filedialog.asksaveasfilename(
-            title="保存 backdrop.tpl", defaultextension=".tpl",
-            initialfile="backdrop.tpl",
-            filetypes=[("TPL 纹理", "*.tpl"), ("所有文件", "*.*")])
+        if not self.images:
+            messagebox.showwarning("没有图片", "请先添加至少一张图片。")
+            return
+        out = filedialog.askdirectory(
+            title="选一个文件夹，在里面生成 backdrop1.tpl、backdrop2.tpl…",
+            initialdir=str(Path.home() / "Desktop"))
         if not out:
+            return
+        names = self._expected_names()
+        exist = [n for n in names if (Path(out) / n).is_file()]
+        if exist and not messagebox.askyesno(
+                "确认覆盖", "这个文件夹里已有同名文件：\n\n%s\n\n将被覆盖，继续？"
+                % "、".join(exist)):
             return
 
         def work():
-            data = self._build_bytes()
-            Path(out).write_bytes(data)
-            self._last_tpl = data
-            return {"path": out, "size": len(data)}
+            files = self._build_files()
+            for name, data in files.items():
+                p = Path(out) / name
+                p.write_bytes(data)
+                if p.read_bytes() != data:
+                    raise OSError("写入后回读不一致：%s" % p)
+            self._last_files = files
+            return {"dir": out, "names": sorted(files),
+                    "size": sum(len(d) for d in files.values())}
 
         def done(r):
-            self._log("已保存 %s（%d 字节，SHA %s…）。放到 SD 的 swiss/ 目录并重启 Swiss 即可生效。"
-                      % (r["path"], r["size"], sha(Path(r["path"]).read_bytes())[:12]))
-            messagebox.showinfo("生成完成",
-                                "TPL 已生成：\n%s\n\n%d 字节\n\n复制到 <启动设备>:/swiss/backdrop.tpl 后重启 Swiss。"
-                                % (r["path"], r["size"]))
+            self._log("已导出 %d 个 TPL 到 %s（合计 %d 字节）"
+                      % (len(r["names"]), r["dir"], r["size"]))
+            messagebox.showinfo(
+                "生成完成",
+                "已在下面这个文件夹生成 %d 个 TPL：\n\n%s\n\n%s\n\n合计 %d 字节。\n\n"
+                "把 swiss/ 目录里的这些文件放到 <启动设备>:/swiss/，\n"
+                "再到 Swiss「设置 → 界面设置 (2/6) → 背景图」选对应编号即可切换。"
+                % (len(r["names"]), r["dir"], "、".join(r["names"]), r["size"]))
 
-        self._run("生成 TPL", work, done)
+        self._run("生成 TPL 文件", work, done)
 
     # ------------------------------------------------------------ 离线 SD 卡导出
     def _refresh_drives(self):
@@ -885,72 +1016,83 @@ class App(tk.Tk):
         do_zip = self.zip_var.get()
 
         def work():
-            data = self._build_bytes()
-            self._last_tpl = data
+            files = self._build_files()
+            self._last_files = files
             meta = sd.make_meta(
-                data, count=tpl_info(data)["count"], fmt=self.fmt_var.get(),
-                size_px=self.size_var.get(), fit=self.fit_var.get(),
-                images=self.images)
-            return sd.make_package(data, pkg, meta=meta, make_zip=do_zip)
+                files, count=sum(tpl_info(d)["count"] for d in files.values()),
+                fmt=self.fmt_var.get(), size_px=self.size_var.get(),
+                fit=self.fit_var.get(), images=self.images, mode=self._mode())
+            return sd.make_package(files, pkg, meta=meta, make_zip=do_zip)
 
         def done(r):
             extra = "\n同时打包：%s" % r["zip"] if r["zip"] else ""
-            self._log("离线包已生成：%s · %d 字节 · SHA %s…%s"
-                      % (r["dir"], r["size"], r["sha"][:12], extra))
+            self._log("离线包已生成：%s · %d 个 TPL · 合计 %d 字节%s"
+                      % (r["dir"], len(r["names"]), r["size"], extra))
+            numbered = self._mode() == "numbered"
+            step = ("\n拷好后到 Swiss「设置 → 界面设置 (2/6) → 背景图」\n"
+                    "按左右键选 1~%d 即可切换（0 = 关闭）。" % len(r["names"])) if numbered \
+                else "\n这是旧版单文件模式，按贴图数由固件按日历轮换。"
             msg = ("已生成可直接拷贝的文件夹：\n\n%s\n\n"
                    "目录结构：\n"
-                   "  swiss\\backdrop.tpl      ← 只需把这个 swiss 文件夹\n"
-                   "  【必读】安装到 SD 卡.txt     整个复制到 SD 卡根目录\n"
+                   "  swiss\\%s  ← 把这整个 swiss 文件夹\n"
+                   "  【必读】安装到 SD 卡.txt     复制到 SD 卡根目录\n"
                    "  背景图信息.txt\n"
                    "  copy_to_sd.bat（可选一键复制）%s\n\n"
-                   "%d 字节，SHA-256 %s…\n\n"
-                   "复制完成后断电重启 Swiss 生效。全程不需要网卡。"
-                   % (r["dir"], extra, r["size"], r["sha"][:12]))
+                   "%d 个 TPL，合计 %d 字节。%s\n\n"
+                   "全程不需要网卡。"
+                   % (r["dir"], ("backdrop1.tpl ~ %s" % r["names"][-1])
+                      if numbered else "backdrop.tpl",
+                      extra, len(r["names"]), r["size"], step))
             if messagebox.askyesno("生成完成", msg + "\n\n现在打开这个文件夹？"):
                 self._open_in_explorer(r["dir"])
 
         self._run("生成 SD 卡文件", work, done)
 
     def _drivedata(self):
-        """返回 (盘符根路径, 目标文件路径)；输入不合法时弹窗并返回 None。"""
+        """返回 (盘符根路径, swiss 目录)；输入不合法时弹窗并返回 None。"""
         raw = self.drive_var.get().strip()
         try:
             root = sd.check_drive(raw)
         except ValueError as exc:
             messagebox.showerror("盘符有误", str(exc))
             return None
-        target = str(Path(root) / sd.SD_SUBDIR / sd.BACKDROP_NAME)
-        return root, target
+        return root, str(Path(root) / sd.SD_SUBDIR)
 
     def _write_drive(self):
+        if not self.images:
+            messagebox.showwarning("没有图片", "请先添加至少一张图片。")
+            return
         got = self._drivedata()
         if not got:
             return
-        root, target = got
+        root, folder = got
+        names = self._expected_names()
         if not messagebox.askyesno(
                 "确认写入 SD 卡",
-                "将把背景图直接写到：\n\n%s\n\n"
-                "• 只改这一个文件，不动 SD 卡上的其它内容\n"
-                "• 若已存在同名文件，会先备份成 backdrop.tpl.bak\n"
-                "• 写完后会回读校验 SHA-256\n\n"
-                "请确认 %s 确实是 SD 卡盘符。继续？" % (target, root)):
+                "将把 %d 个背景图写到：\n\n%s\\\n\n%s\n\n"
+                "• 只写这些 backdrop*.tpl，不动 SD 卡上的其它内容\n"
+                "• 同名旧文件会先备份成 .bak\n"
+                "• 写完后逐个回读校验\n\n"
+                "请确认 %s 确实是 SD 卡盘符。继续？"
+                % (len(names), folder, "、".join(names), root)):
             return
 
         def work():
-            data = self._build_bytes()
-            self._last_tpl = data
-            return sd.write_to_sd(data, root)
+            files = self._build_files()
+            self._last_files = files
+            return sd.write_to_sd(files, root)
 
         def done(r):
-            self._log("已写入 %s · %d 字节 · SHA %s…（本地回读一致）%s"
-                      % (r["path"], r["size"], r["sha"][:12],
+            self._log("已写入 %d 个 TPL 到 %s · 合计 %d 字节%s"
+                      % (len(r["names"]), folder, r["size"],
                          " · 旧文件已备份" if r["backup"] else ""))
             messagebox.showinfo(
                 "写入成功",
-                "已写入 %s\n\n%d 字节，回读 SHA-256 一致。%s\n\n"
-                "安全弹出 SD 卡，插回 GameCube 后断电重启才会生效。"
-                % (r["path"], r["size"],
-                   "旧文件备份为 backdrop.tpl.bak。" if r["backup"] else ""))
+                "已写入 %d 个文件：\n%s\n\n合计 %d 字节，逐个回读一致。%s\n\n"
+                "安全弹出 SD 卡插回 GameCube，断电重启后到\n"
+                "「设置 → 界面设置 (2/6) → 背景图」选对应编号切换。"
+                % (len(r["names"]), "、".join(r["names"]), r["size"],
+                   "旧文件已备份为 .bak。" if r["backup"] else ""))
 
         self._run("写入 SD 卡", work, done)
 
@@ -958,16 +1100,17 @@ class App(tk.Tk):
         got = self._drivedata()
         if not got:
             return
-        root, target = got
+        root, folder = got
+        allnames = [sd.BACKDROP_NAME] + sd.NUMBERED_NAMES
         if not messagebox.askyesno(
                 "确认移除",
-                "将只删除这一个文件：\n\n%s\n\n"
-                "SD 卡上其它内容不会改动。断电重启 Swiss 后恢复内置深蓝背景。\n\n继续？"
-                % target):
+                "将只删除 %s\\ 下这些背景图文件（存在的才删）：\n\n%s\n\n"
+                "global.ini 等其它文件、以及 .bak 备份都不会动。\n\n继续？"
+                % (folder, "、".join(allnames))):
             return
         self._run("从 SD 卡移除背景",
                   lambda: sd.remove_from_sd(root),
-                  lambda r: (self._log("移除背景：%s · %s" % (r["path"], r["message"])),
+                  lambda r: (self._log("移除背景：%s" % r["message"].replace("\n", " ")),
                              messagebox.showinfo("完成", r["message"])))
 
     def _check(self):
@@ -989,12 +1132,13 @@ class App(tk.Tk):
                       (st.get("dev", "?"), st.get("path", "?"), r["vol"]))
             try:
                 c = SwissClient(host)
-                p = r["vol"] + REMOTE_NAME
-                e = c.exists(r["vol"] + "swiss/", "backdrop.tpl")
-                if e:
-                    self._log("SD 上已有背景图：%s（%d 字节）" % (p, e.size))
-                else:
-                    self._log("SD 上暂无 backdrop.tpl，当前使用内置默认背景。")
+                found = []
+                for name in [sd.BACKDROP_NAME] + sd.NUMBERED_NAMES:
+                    e = c.exists(r["vol"] + REMOTE_DIR, name)
+                    if e:
+                        found.append("%s(%d B)" % (name, e.size))
+                self._log("SD 上已有背景图：%s" % ("、".join(found)
+                                              if found else "无，使用内置默认背景"))
             except Exception:
                 pass
 
@@ -1004,38 +1148,41 @@ class App(tk.Tk):
         host = self.host_var.get().strip()
 
         def work():
-            data = self._build_bytes()
-            self._last_tpl = data
-            self.q.put(("info", "", "TPL 已生成 %d 字节，开始上传…" % len(data), None))
+            files = self._build_files()
+            self._last_files = files
+            self.q.put(("info", "", "已生成 %d 个 TPL（合计 %d 字节），开始上传…"
+                        % (len(files), sum(len(d) for d in files.values())), None))
 
             def progress(sent, total, speed):
                 self.q.put(("prog", "", min(99, int(sent / max(1, total) * 100)), None))
 
-            r = upload_tpl(host, data, progress)
-            r["local"] = len(data)
-            return r
+            return upload_tpls(host, files, progress)
 
         def done(r):
             self.prog.configure(value=100)
-            self._log("上传完成：%s · %d 字节 · SHA %s…（回读一致）"
-                      % (r["target"], r["size"], r["sha"][:12]))
+            self._log("上传完成：%d 个文件 · %s · 合计 %d 字节（逐个回读一致）"
+                      % (len(r["names"]), "、".join(r["names"]), r["size"]))
             messagebox.showinfo(
                 "上传成功",
-                "已写入 %s\n\n%d 字节，回读 SHA-256 校验一致。\n\n"
-                "背景图只在开机时读取一次，请重启 Swiss（断电重启或重新加载 DOL）后生效。"
-                % (r["target"], r["size"]))
+                "已上传 %d 个文件：\n%s\n\n合计 %d 字节，逐个回读一致。\n\n"
+                "现在到 Swiss「设置 → 界面设置 (2/6) → 背景图」按左右键选\n"
+                "1~%d，选中即立刻切换（0 = 关闭/内置默认背景）。"
+                % (len(r["names"]), "、".join(r["names"]), r["size"],
+                   len(r["names"])))
 
         self._run("上传背景到 Swiss", work, done)
 
     def _remove(self):
-        if not messagebox.askyesno("恢复默认背景",
-                                   "将删除 SD 卡上的 swiss/backdrop.tpl。\n\n"
-                                   "删除后需重启 Swiss 才会恢复内置深蓝背景。确定继续？"):
+        if not messagebox.askyesno(
+                "恢复默认背景",
+                "将删除 SD 卡上的这些背景图（不存在的跳过）：\n\n%s\n\n"
+                "其它文件不动。删除后在设置里把「背景图」选成 0 即恢复内置背景。\n\n确定继续？"
+                % "、".join([sd.BACKDROP_NAME] + sd.NUMBERED_NAMES)):
             return
         host = self.host_var.get().strip()
         self._run("删除 SD 上的背景图",
                   lambda: remove_tpl(host),
-                  lambda r: self._log("已删除背景图（%s）。重启 Swiss 后恢复默认深蓝背景。" % r))
+                  lambda r: self._log("远端移除背景：%s" % r))
 
     def _grab(self):
         host = self.host_var.get().strip()
@@ -1066,23 +1213,27 @@ class App(tk.Tk):
         messagebox.showinfo(
             "使用说明",
             "【不需要网卡】本工具默认走离线路径，GameCube 没装网卡也完全可用。\n\n"
-            "1. 添加一张或多张图片（PNG/JPG/WEBP 均可，中文路径没问题）。\n"
+            "1. 添加 1~9 张图片（PNG/JPG/WEBP 均可，中文路径没问题）。\n"
+            "   列表顺序就是编号：第 1 张 → backdrop1.tpl，第 2 张 → backdrop2.tpl…\n"
+            "   用「添加 / 移除 / 上移 / 下移」调整顺序。\n"
             "2. 用右侧参数裁切、压暗；勾选「叠加模拟界面」预判白色文字是否看得清。\n"
-            "3. 选一种导出方式：\n"
-            "   ① 生成 SD 卡文件：得到 SwissBackdrop_SD 文件夹，里面有\n"
-            "      swiss\\backdrop.tpl、中文安装说明、一键复制 bat。\n"
-            "      把 swiss 文件夹整个拷进 SD 卡根目录即可（可勾 zip 发给别人）。\n"
-            "   ② SD 卡已插在电脑上：底部选盘符 →「写入 SD 卡」，自动建目录、\n"
-            "      备份旧文件、回读 SHA-256 校验。\n"
-            "   ③ 只导出 backdrop.tpl：给懂路径的老手自己放。\n"
-            "4. 安全弹出 SD 卡，插回 GameCube，断电重启（背景只在开机读一次）。\n\n"
-            "固定路径：<启动设备>:/swiss/backdrop.tpl\n"
-            "恢复默认：删掉这个 backdrop.tpl 再重启（可用「从 SD 卡移除背景」）。\n"
-            "背景图是 SD 卡上的独立文件，不写进 IPL.dol，换图不用重刷固件。\n\n"
-            "【可选】装了网卡时，可填主机 IP 用「上传到 Swiss 并生效」直传，\n"
+            "3. 生成方式默认「逐张编号」，每张图一个独立 TPL；\n"
+            "   改选「合并为 backdrop.tpl」则回到旧版：一个文件多张贴图按日历轮换。\n"
+            "4. 选一种导出方式：\n"
+            "   ① 生成 SD 卡文件：得到 SwissBackdrop_SD 文件夹，含 swiss\\ 下的\n"
+            "      backdrop1.tpl…、中文安装说明、一键复制 bat（可勾 zip）。\n"
+            "   ② 只导出 TPL 文件：选一个文件夹，直接吐出编号好的 tpl。\n"
+            "   ③ SD 卡插在电脑上：底部选盘符 →「写入 SD 卡」，自动备份并回读校验。\n"
+            "5. 把 swiss 文件夹整个拷进 SD 卡根目录 → 插回 GameCube → 断电重启。\n"
+            "6. 【关键】设置 → 界面设置 (2/6) → 背景图，左右键选 1~N 即时切换；\n"
+            "   选中的编号会存进 global.ini，下次开机保持。0 = 关闭/内置默认背景。\n\n"
+            "固件路径：<启动设备>:/swiss/backdrop1.tpl ~ backdrop9.tpl（最多 9 个）\n"
+            "旧名 backdrop.tpl 仅在「编号 1 且 1 号文件缺失」时被回退读取。\n"
+            "恢复默认：设置里选 0，或删掉 swiss\\backdrop*.tpl（本工具「从 SD 卡移除背景」）。\n"
+            "背景图是独立文件，不写进 IPL.dol，换图不用重刷固件。\n\n"
+            "【可选】装了网卡时，可填主机 IP 用「上传到 Swiss 并生效」批量直传，\n"
             "或「抓实机画面」看真实效果；没有网络时这些按钮不用管。\n\n"
-            "多张图按日历轮换：7 张按星期、12 张按月份、24 张按小时、31 张按日期。\n"
-            "格式建议：RGB5A3 画质最好（约 600 KB）；CI8 省一半内存（约 300 KB），"
+            "格式建议：RGB5A3 画质最好（约 600 KB/张）；CI8 省一半内存（约 300 KB），"
             "渐变特别细腻的图可能有轻微色带。\n"
             "工具内置 TPL 编码器，不需要 devkitPro / gxtexconv。")
 
@@ -1095,6 +1246,7 @@ class App(tk.Tk):
     def _on_close(self):
         self.cfg.update({
             "host": self.host_var.get().strip(),
+            "mode": self._mode(),
             "format": self.fmt_var.get(),
             "size": self.size_var.get(),
             "fit": self.fit_var.get(),
@@ -1153,7 +1305,34 @@ def selftest() -> int:
         d = encode_tpl([im] * 7, "ci8")
         assert tpl_info(d)["count"] == 7
         assert decode_tpl(d, 6).size == (640, 480)
-    check("7 张按星期轮换 TPL", multi)
+    check("7 张按星期轮换 TPL（合并模式）", multi)
+
+    def batch_numbered():
+        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+        with tempfile.TemporaryDirectory(prefix="swissbg_batch_") as td:
+            paths = []
+            for i, c in enumerate(colors):
+                p = os.path.join(td, "背景 %d.png" % (i + 1))
+                Image.new("RGB", (64, 48), c).save(p)
+                paths.append(p)
+            files = build_set(paths, 64, 48, "cover", "rgb5a3", Adjust())
+            assert sorted(files) == ["backdrop1.tpl", "backdrop2.tpl", "backdrop3.tpl"], sorted(files)
+            for name, c in zip(sorted(files), colors):
+                assert tpl_info(files[name])["count"] == 1, name
+                mean = ImageStat.Stat(decode_tpl(files[name])).mean
+                assert max(abs(x - y) for x, y in zip(mean, c)) < 20, (name, mean, c)
+            # 固件只认 1~9，超出必须明确报错
+            try:
+                build_set(paths * 4, 64, 48, "cover", "rgb5a3", Adjust())
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("超过 9 张应被拒绝")
+            # 合并模式保持旧行为：一个文件 3 张贴图
+            merged = build_set(paths, 64, 48, "cover", "rgb5a3", Adjust(), "merged")
+            assert list(merged) == [sd.BACKDROP_NAME]
+            assert tpl_info(merged[sd.BACKDROP_NAME])["count"] == 3
+    check("批量编号 backdrop1~N / 9 张上限 / 合并模式", batch_numbered)
 
     def rgb_exact():
         root = project_root()
@@ -1182,35 +1361,67 @@ def selftest() -> int:
     check("压暗/暗角调节生效", adjust)
 
     def offline_package():
-        d = encode_tpl([im], "rgb5a3")
-        meta = sd.make_meta(d, count=1, fmt="rgb5a3", size_px="640x480",
-                            fit="cover", images=["测试图.png"])
+        d1 = encode_tpl([im], "rgb5a3")
+        d2 = encode_tpl([Image.new("RGB", (640, 480), (30, 60, 90))], "rgb5a3")
+        files = {"backdrop1.tpl": d1, "backdrop2.tpl": d2}
+        meta = sd.make_meta(files, count=2, fmt="rgb5a3", size_px="640x480",
+                            fit="cover", images=["测试图1.png", "测试图2.png"],
+                            mode="numbered")
         with tempfile.TemporaryDirectory(prefix="swissbg_sd_") as td:
             pkg = Path(td) / sd.PACKAGE_NAME
-            r = sd.make_package(d, pkg, meta=meta, make_zip=True)
-            assert (pkg / sd.SD_SUBDIR / sd.BACKDROP_NAME).read_bytes() == d
-            assert (pkg / sd.README_NAME).exists()
-            assert b"swiss" in (pkg / sd.README_NAME).read_bytes()
+            r = sd.make_package(files, pkg, meta=meta, make_zip=True)
+            assert r["names"] == ["backdrop1.tpl", "backdrop2.tpl"]
+            assert (pkg / sd.SD_SUBDIR / "backdrop1.tpl").read_bytes() == d1
+            assert (pkg / sd.SD_SUBDIR / "backdrop2.tpl").read_bytes() == d2
+            assert not (pkg / sd.SD_SUBDIR / sd.BACKDROP_NAME).exists()
+            readme = (pkg / sd.README_NAME).read_text(encoding="utf-8")
+            assert "backdrop1.tpl" in readme and "界面设置" in readme
+            assert "backdrop1.tpl" in (pkg / sd.INFO_NAME).read_text(encoding="utf-8")
             assert (pkg / sd.BAT_NAME).read_bytes().startswith(b"@echo off")
             assert Path(r["zip"]).exists()
             with zipfile.ZipFile(r["zip"]) as z:
-                assert z.read("swiss/backdrop.tpl") == d
+                assert z.read("swiss/backdrop1.tpl") == d1
+                assert z.read("swiss/backdrop2.tpl") == d2
             # 覆盖保护
             try:
-                sd.make_package(d, pkg, meta=meta)
+                sd.make_package(files, pkg, meta=meta)
             except ValueError:
                 pass
             else:
                 raise AssertionError("非空目录应拒绝覆盖")
+            # 旧接口（bytes → backdrop.tpl）仍可用
+            pkg2 = Path(td) / "legacy"
+            r2 = sd.make_package(d1, pkg2, meta=sd.make_meta(d1))
+            assert r2["names"] == [sd.BACKDROP_NAME]
+            assert (pkg2 / sd.SD_SUBDIR / sd.BACKDROP_NAME).read_bytes() == d1
             # 拒绝磁盘根目录 / 主目录
             for bad in (Path(td).anchor, Path.home()):
                 try:
-                    sd.make_package(d, bad, meta=meta)
+                    sd.make_package(files, bad, meta=meta)
                 except ValueError:
                     pass
                 else:
                     raise AssertionError("应拒绝写到 %s" % bad)
-    check("离线 SD 卡包（目录结构/zip/覆盖保护）", offline_package)
+    check("离线 SD 卡包（多编号/zip/旧接口/覆盖保护）", offline_package)
+
+    def file_names():
+        assert sd.numbered_names(3) == ["backdrop1.tpl", "backdrop2.tpl", "backdrop3.tpl"]
+        for bad in (0, 10):
+            try:
+                sd.numbered_names(bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("应拒绝 %d 张" % bad)
+        assert sd.normalize_files(b"x") == {sd.BACKDROP_NAME: b"x"}
+        for bad in ("../../evil.tpl", "global.ini", "backdrop10.tpl"):
+            try:
+                sd.normalize_files({bad: b"x"})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("应拒绝文件名 %s" % bad)
+    check("编号与文件名白名单（防越界写入）", file_names)
 
     def drive_guard():
         assert sd.coerce_drive("g") == "G:\\"
@@ -1229,17 +1440,19 @@ def selftest() -> int:
     return 1 if failures else 0
 
 
-def _cli_tpl(args) -> bytes:
-    """离线导出用的 TPL：优先 --sd-tpl 现成文件，否则从 --images 生成。"""
+def _cli_files(args) -> dict[str, bytes]:
+    """离线导出用的 TPL 集合：优先 --sd-tpl 现成文件，否则从 --images 生成。"""
     if args.sd_tpl:
-        return Path(args.sd_tpl).read_bytes()
+        p = Path(args.sd_tpl)
+        name = p.name.lower() if sd.NAME_RE.fullmatch(p.name) else sd.BACKDROP_NAME
+        return {name: p.read_bytes()}
     if not args.images:
         raise ValueError("需要 --images 图片列表，或用 --sd-tpl 指定现成的 TPL")
     w, h = (int(x) for x in args.size.split("x"))
     adj = Adjust(brightness=args.brightness, contrast=args.contrast,
                  saturation=args.saturation, blur=args.blur,
                  vignette=args.vignette)
-    return build_tpl(args.images, w, h, args.fit, args.format, adj)
+    return build_set(args.images, w, h, args.fit, args.format, adj, args.mode)
 
 
 def cli(args) -> int:
@@ -1254,50 +1467,78 @@ def cli(args) -> int:
         return 0
     if args.remove_drive:
         r = sd.remove_from_sd(args.remove_drive)
-        print("%s：%s" % (r["path"], r["message"]))
+        print(r["message"])
         return 0
 
     if args.sd_package or args.write_drive:
-        data = _cli_tpl(args)
-        meta = sd.make_meta(data, count=tpl_info(data)["count"],
-                            fmt="现成 TPL" if args.sd_tpl else args.format,
-                            size_px=args.size, fit=args.fit,
-                            images=[] if args.sd_tpl else (args.images or []))
+        files = _cli_files(args)
+        meta = sd.make_meta(
+            files, count=sum(tpl_info(d)["count"] for d in files.values()),
+            fmt="现成 TPL" if args.sd_tpl else args.format,
+            size_px=args.size, fit=args.fit,
+            images=[] if args.sd_tpl else (args.images or []),
+            mode=None if args.sd_tpl else args.mode)
         if args.sd_package:
-            r = sd.make_package(data, args.sd_package, meta=meta,
+            r = sd.make_package(files, args.sd_package, meta=meta,
                                 make_zip=args.zip, force=args.force)
             print("离线包：%s" % r["dir"])
-            print("  %s  %d 字节  sha256=%s" % (r["tpl"], r["size"], r["sha"]))
+            for n in r["names"]:
+                print("  swiss/%s" % n)
+            print("  共 %d 个 TPL / %d 字节" % (len(r["names"]), r["size"]))
             print("  说明文件：%s" % sd.README_NAME)
             if r["zip"]:
                 print("  zip：%s" % r["zip"])
-            print("  把 swiss 文件夹整个拷进 SD 卡根目录，断电重启 Swiss 生效。")
+            print("  把 swiss 文件夹整个拷进 SD 卡根目录，重启后在")
+            print("  设置 → 界面设置 (2/6) → 背景图 选 1~%d。" % len(r["names"]))
         if args.write_drive:
-            r = sd.write_to_sd(data, args.write_drive)
-            print("写入 %s：%d 字节 sha256=%s（本地回读一致）%s" %
-                  (r["path"], r["size"], r["sha"],
-                   "，旧文件已备份为 %s" % r["backup"] if r["backup"] else ""))
+            r = sd.write_to_sd(files, args.write_drive)
+            for p in r["paths"]:
+                print("写入 %s" % p)
+            print("共 %d 个文件 / %d 字节（逐个回读一致）%s" %
+                  (len(r["names"]), r["size"],
+                   "，旧文件已备份为 .bak" if r["backup"] else ""))
         return 0
 
     if args.build:
-        if not args.images:
-            print("--build 需要 --images", file=sys.stderr)
+        if not args.images and not args.sd_tpl:
+            print("--build 需要 --images 或 --sd-tpl", file=sys.stderr)
             return 2
-        w, h = (int(x) for x in args.size.split("x"))
-        adj = Adjust(brightness=args.brightness, contrast=args.contrast,
-                     saturation=args.saturation, blur=args.blur,
-                     vignette=args.vignette)
-        data = build_tpl(args.images, w, h, args.fit, args.format, adj)
-        Path(args.out or "backdrop.tpl").write_bytes(data)
-        print("生成 %s：%d 字节  sha256=%s" %
-              (args.out or "backdrop.tpl", len(data), sha(data)))
+        files = _cli_files(args)
+        if args.out_dir:
+            out = Path(args.out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            for n, d in sorted(files.items()):
+                (out / n).write_bytes(d)
+                print("生成 %s：%d 字节  sha256=%s" % (out / n, len(d), sha(d)))
+        else:
+            if len(files) > 1:
+                raise ValueError("生成了 %d 个编号 TPL，请用 --out-dir 指定输出文件夹" % len(files))
+            name, data = next(iter(files.items()))
+            target = Path(args.out or name)
+            target.write_bytes(data)
+            print("生成 %s：%d 字节  sha256=%s" % (target, len(data), sha(data)))
         print("提示：用 --sd-package 目录 可生成可直接拷进 SD 卡的文件夹（无需网卡）。")
         return 0
+    if args.upload_dir:
+        folder = Path(args.upload_dir)
+        files = {p.name.lower(): p.read_bytes()
+                 for p in sorted(folder.glob("backdrop*.tpl"))
+                 if sd.NAME_RE.fullmatch(p.name)}
+        if not files:
+            raise ValueError("%s 里没有 backdrop*.tpl" % folder)
+        r = upload_tpls(host, files)
+        print("批量上传 %d 个文件 / %d 字节：" % (len(r["names"]), r["size"]))
+        for t in r["targets"]:
+            print("  " + t)
+        print("完成（逐个回读一致）。到设置 → 界面设置 (2/6) → 背景图选编号切换。")
+        return 0
     if args.upload:
-        data = Path(args.upload).read_bytes()
+        p = Path(args.upload)
+        data = p.read_bytes()
+        name = p.name.lower() if sd.NAME_RE.fullmatch(p.name) else sd.BACKDROP_NAME
         info = tpl_info(data)
-        print("上传 %d 字节 / %d 张贴图 -> %s" % (len(data), info["count"], host))
-        r = upload_tpl(host, data)
+        print("上传 %s：%d 字节 / %d 张贴图 -> %s" % (name, len(data), info["count"], host))
+        r = upload_tpl(host, data, name=name)
         print("完成：%s  sha=%s（回读一致）" % (r["target"], r["sha"]))
         return 0
     if args.remove:
@@ -1314,13 +1555,14 @@ def cli(args) -> int:
         c = SwissClient(host)
         print("ping:", c.ping())
         print("state:", c.state())
-        target = remote_path(c)
-        e = c.exists(c.volume + "swiss/", "backdrop.tpl")
-        print("backdrop:", target, "存在" if e else "不存在",
-              ("%d 字节" % e.size) if e else "")
+        vol = c.detect_volume()
+        for name in [sd.BACKDROP_NAME] + sd.NUMBERED_NAMES:
+            e = c.exists(vol + REMOTE_DIR, name)
+            if e:
+                print("  %s%s  存在  %d 字节" % (vol, REMOTE_DIR + name, e.size))
         return 0
-    print("什么都没做。离线用 --sd-package 目录 / --write-drive G:，"
-          "联网用 --upload / --remove / --screen / --state。")
+    print("什么都没做。离线用 --sd-package 目录 / --write-drive G: / --build --out-dir，"
+          "联网用 --upload-dir / --upload / --remove / --screen / --state。")
     return 2
 
 
@@ -1336,8 +1578,14 @@ def main(argv=None) -> int:
     ap.add_argument("--host", default=DEFAULT_HOST)
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--images", nargs="+")
-    ap.add_argument("--out")
+    ap.add_argument("--mode", default="numbered", choices=("numbered", "merged"),
+                    help="numbered=逐张生成 backdrop1~9.tpl；merged=合并成单个 backdrop.tpl")
+    ap.add_argument("--out", help="--build 且只有一个 TPL 时的输出文件名")
+    ap.add_argument("--out-dir", metavar="DIR",
+                    help="--build 批量输出目录，自动命名 backdrop1.tpl…")
     ap.add_argument("--upload", metavar="TPL")
+    ap.add_argument("--upload-dir", metavar="DIR",
+                    help="批量上传目录里的 backdrop*.tpl")
     ap.add_argument("--remove", action="store_true")
     ap.add_argument("--screen", metavar="PNG")
     ap.add_argument("--state", action="store_true")
@@ -1349,9 +1597,9 @@ def main(argv=None) -> int:
     ap.add_argument("--zip", action="store_true", help="配合 --sd-package 同时打包 zip")
     ap.add_argument("--force", action="store_true", help="允许覆盖非空的 --sd-package 目录")
     ap.add_argument("--write-drive", metavar="DRIVE",
-                    help="直接写 <盘符>:\\swiss\\backdrop.tpl 并回读校验")
+                    help="直接写 <盘符>:\\swiss\\backdrop*.tpl 并逐个回读校验")
     ap.add_argument("--remove-drive", metavar="DRIVE",
-                    help="只删除 <盘符>:\\swiss\\backdrop.tpl，恢复默认背景")
+                    help="只删除 <盘符>:\\swiss\\ 下的 backdrop*.tpl，恢复默认背景")
     ap.add_argument("--list-drives", action="store_true", help="列出可用盘符")
     ap.add_argument("--format", default="rgb5a3", choices=list(FORMATS))
     ap.add_argument("--fit", default="cover", choices=("cover", "contain", "stretch"))
