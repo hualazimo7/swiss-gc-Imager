@@ -1,5 +1,8 @@
 # SwissBackdrop（swiss-gc-Imager）
 
+> ⚠️ **禁止商业使用 / NON-COMMERCIAL USE ONLY**：本仓库的原创内容仅限非商业用途，禁止出售、预装到售卖的硬件/存储卡、付费代刷、广告变现等。详见 [LICENSE](LICENSE) 与 [NOTICE.md](NOTICE.md)。
+> 本仓库不含上游 GPL 源码，整个工具（含 EXE）适用该条款。
+
 给 [Swiss](https://github.com/emukidid/swiss-gc) 制作**自定义背景图**的 Windows 工具，当前版本 **v1.1**。
 
 核心目标：**不需要网卡也能用**。工具把图片转成 GameCube 的 TPL 纹理，直接生成可拷贝到 SD 卡的 `swiss/backdrop.tpl` 文件包；有宽带网卡的用户也可以一键上传到实机并抓屏验证。
@@ -111,7 +114,11 @@ py -3 src/build_backdrop_exe.py            # 重新生成 dist/SwissBackdrop.exe
 
 ## 许可与致谢
 
-- 上游 Swiss：[emukidid/swiss-gc](https://github.com/emukidid/swiss-gc)，GPL-2.0，详见 [`LICENSE`](LICENSE)
-- 本工具以 GPL-2.0 发布；TPL 编码实现参考了 devkitPro 的 `gxtexconv` 产物并做过逐字节比对
+> ⚠️ 本仓库**全部原创内容禁止商业使用**。完整条款见 [`LICENSE`](LICENSE)，
+> 范围界定与商用示例见 [`NOTICE.md`](NOTICE.md)。
+
+- **本工具**（`src/`、`dist/SwissBackdrop.exe`、`docs/`、`examples/`）：《非商业使用许可 v1.0》，**禁止商用**
+- **上游 Swiss**：[emukidid/swiss-gc](https://github.com/emukidid/swiss-gc)，GPL-2.0 全文见 [`LICENSE-GPL-2.0.txt`](LICENSE-GPL-2.0.txt)；本工具仅通过其 httpd 接口通信，未复制其源码
+- TPL 编码实现参考了 devkitPro 的 `gxtexconv` 产物并做过逐字节比对
 - 界面依赖 [Pillow](https://python-pillow.org/)，打包使用 [PyInstaller](https://pyinstaller.org/)
 - 配套：[swiss-gc-CN](https://github.com/hualazimo7/swiss-gc-CN)（汉化固件）、[swiss-gc-ftp](https://github.com/hualazimo7/swiss-gc-ftp)（文件传输）
