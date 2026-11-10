@@ -1,5 +1,13 @@
 # 更新记录
 
+## 发布规则（2026-11-10 起）
+
+- 本库与 `swiss-gc-CN` 一样采用**不可变发布**：已发布的 tag / 附件 / Release 说明一律冻结，
+  每次改动发新的 `vX.Y`，旧版本永久保留；禁止 `gh release upload --clobber`、
+  `delete-asset`、改写已发布说明、强推 tag
+- 完整规则见 [swiss-gc-CN 的发布规则](https://github.com/hualazimo7/swiss-gc-CN/blob/main/docs/RELEASE_POLICY.md)
+- 现有 Release：`v1.2`（Latest）、`v1.1`（历史版，仍可下载）
+
 ## v1.2（2026-11-09）— 多图批量生成 backdrop1.tpl、backdrop2.tpl……
 
 汉化固件新增「设置 → 界面设置 (2/6) → 背景图」0~9 即时切换，工具同步改造：
